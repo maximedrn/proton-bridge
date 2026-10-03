@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with Proton Mail Bridge. If not, see <https://www.gnu.org/licenses/>.
 
-if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]] ; then
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]] || [[ "$OSTYPE" == "cygwin" ]] ; then
     Powershell.exe -File build.ps1 "$@"
     exit $?
 fi
@@ -42,7 +42,6 @@ check_exit() {
     # shellcheck disable=SC2181
     if [ $? -ne 0 ]; then
         echo "Process failed: $1"
-        rm -r "$BUILD_DIR"
         exit 1
     fi
 }
@@ -59,8 +58,8 @@ BRIDGE_REVISION=$(git rev-parse --short=10 HEAD)
 BRIDGE_TAG=${BRIDGE_TAG:-"NOTAG"}
 BRIDGE_DSN_SENTRY=${BRIDGE_DSN_SENTRY}
 BRIDGE_BUILD_TIME=${BRIDGE_BUILD_TIME}
-BRIDGE_BUILD_ENV= ${BRIDGE_BUILD_ENV:-"dev"}
-git submodule update --init --recursive ${VCPKG_ROOT}
+BRIDGE_BUILD_ENV=${BRIDGE_BUILD_ENV:-"dev"}
+git submodule update --init --recursive "${VCPKG_ROOT}"
 check_exit "Failed to initialize vcpkg as a submodule."
 
 echo submodule updated
@@ -69,28 +68,30 @@ VCPKG_EXE="${VCPKG_ROOT}/vcpkg"
 VCPKG_BOOTSTRAP="${VCPKG_ROOT}/bootstrap-vcpkg.sh"
 
 
-${VCPKG_BOOTSTRAP} -disableMetrics
+"${VCPKG_BOOTSTRAP}" -disableMetrics
 check_exit "Failed to bootstrap vcpkg."
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    ${VCPKG_EXE} install sentry-native:arm64-osx-min-11-0 grpc:arm64-osx-min-11-0 --overlay-triplets=vcpkg/triplets --clean-after-build
-    check_exit "Failed installing gRPC for macOS / Apple Silicon"
-    ${VCPKG_EXE} install sentry-native:x64-osx-min-10-15 grpc:x64-osx-min-10-15 --overlay-triplets=vcpkg/triplets --clean-after-build
-    check_exit "Failed installing gRPC for macOS / Intel x64"
+    BRIDGE_MACOS_ARCH=${BRIDGE_MACOS_ARCH:-$(uname -m)}
+    case "$BRIDGE_MACOS_ARCH" in
+        arm64) VCPKG_TRIPLET=arm64-osx-min-11-0 ;;
+        x86_64) VCPKG_TRIPLET=x64-osx-min-10-15 ;;
+        *) echo "Unsupported macOS architecture: $BRIDGE_MACOS_ARCH"; exit 1 ;;
+    esac
+    # DeployDarwin bundles a universal crash handler, while the GUI uses native gRPC.
+    "${VCPKG_EXE}" install sentry-native:arm64-osx-min-11-0 sentry-native:x64-osx-min-10-15 "grpc:${VCPKG_TRIPLET}" --overlay-triplets=vcpkg/triplets --clean-after-build
+    check_exit "Failed installing GUI dependencies for macOS / ${BRIDGE_MACOS_ARCH}"
 elif [[ "$OSTYPE" == "linux"* ]]; then
-    ${VCPKG_EXE} install sentry-native:x64-linux grpc:x64-linux --clean-after-build
+    "${VCPKG_EXE}" install sentry-native:x64-linux grpc:x64-linux --clean-after-build
     check_exit "Failed installing gRPC for Linux / Intel x64"
 else
     echo "For Windows, use the build.ps1 Powershell script."
     exit 1
 fi
 
-${VCPKG_EXE} upgrade --no-dry-run
-
+BRIDGE_CMAKE_MACOS_OPTS=()
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  BRIDGE_CMAKE_MACOS_OPTS="-DCMAKE_OSX_ARCHITECTURES=${BRIDGE_MACOS_ARCH:-$(uname -m)}"
-else
-  BRIDGE_CMAKE_MACOS_OPTS=""
+    BRIDGE_CMAKE_MACOS_OPTS=("-DCMAKE_OSX_ARCHITECTURES=${BRIDGE_MACOS_ARCH}")
 fi
 
 cmake  \
@@ -100,9 +101,9 @@ cmake  \
     -DBRIDGE_REVISION="${BRIDGE_REVISION}" \
     -DBRIDGE_TAG="${BRIDGE_TAG}" \
     -DBRIDGE_DSN_SENTRY="${BRIDGE_DSN_SENTRY}" \
-    -DBRIDGE_BRIDGE_TIME="${BRIDGE_BRIDGE_TIME}" \
+    -DBRIDGE_BUILD_TIME="${BRIDGE_BUILD_TIME}" \
     -DBRIDGE_BUILD_ENV="${BRIDGE_BUILD_ENV}" \
-    -DBRIDGE_APP_VERSION="${BRIDGE_APP_VERSION}" "${BRIDGE_CMAKE_MACOS_OPTS}" \
+    -DBRIDGE_APP_VERSION="${BRIDGE_APP_VERSION}" "${BRIDGE_CMAKE_MACOS_OPTS[@]}" \
     -G Ninja \
     -S . \
     -B "${BUILD_DIR}"

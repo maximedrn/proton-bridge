@@ -1,0 +1,159 @@
+name: Build on multiple platforms
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Test free-plan compatibility
+        run: go test -race ./internal/constants
+      - name: Test QA version handling
+        run: go test -tags=build_qa ./internal/constants
+      - name: Test build scripts
+        run: python3 utils/test_build_scripts.py
+      - name: Validate workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
+
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15, macos-15-intel]
+    steps:
+      - name: Free Windows runner disk space
+        if: startsWith( matrix.os, 'windows' )
+        uses: justinthelaw/maximize-github-runner-space@v0.12.3
+        with:
+          skip-components: visual-studio, xcode, docker-images
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        if: startsWith( matrix.os, 'windows' )
+        with:
+          python-version: '>=3.14.0'
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.2
+          cache: true
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install Linux dependencies
+        if: startsWith( matrix.os, 'ubuntu' )
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libglvnd-dev \
+            libsecret-1-dev \
+            linux-libc-dev \
+            libfido2-dev \
+            libcbor-dev \
+            autoconf \
+            autoconf-archive \
+            automake \
+            libtool \
+            pkg-config
+      - name: Install Windows dependencies
+        if: startsWith( matrix.os, 'windows' )
+        shell: powershell
+        run: choco install -y zip ninja
+      - name: Install macOS dependencies
+        if: startsWith( matrix.os, 'macos' )
+        run: brew install zip ninja libfido2 libcbor
+      - name: Retrieve vcpkg commit hash
+        id: cache_info
+        shell: bash
+        run: |
+          mkdir -p .cache
+          vcpkg_root=extern/vcpkg
+          cache_dir="$PWD/.cache"
+          if [ "$RUNNER_OS" = Windows ]; then
+            vcpkg_root=extern/vcpkg-windows
+            cache_dir=$(cygpath -m "$cache_dir")
+          fi
+          echo "vcpkg_commit=$(git -C "$vcpkg_root" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "vcpkg_cache_dir=$cache_dir" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            .cache/
+            extern/vcpkg/downloads
+            extern/vcpkg-windows/downloads
+          key: vcpkg-v2-${{ matrix.os }}-${{ runner.arch }}-${{ steps.cache_info.outputs.vcpkg_commit }}-${{ hashFiles('Makefile', 'internal/frontend/bridge-gui/bridge-gui/build.*', 'internal/frontend/bridge-gui/bridge-gui/vcpkg/**') }}-${{ github.sha }}
+          restore-keys: |
+            vcpkg-v2-${{ matrix.os }}-${{ runner.arch }}-${{ steps.cache_info.outputs.vcpkg_commit }}-${{ hashFiles('Makefile', 'internal/frontend/bridge-gui/bridge-gui/build.*', 'internal/frontend/bridge-gui/bridge-gui/vcpkg/**') }}-
+            vcpkg-v2-${{ matrix.os }}-${{ runner.arch }}-${{ steps.cache_info.outputs.vcpkg_commit }}-
+      - name: Build
+        id: build
+        env:
+          MSYSTEM: ""
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ steps.cache_info.outputs.vcpkg_cache_dir }}
+          VCPKG_DISABLE_METRICS: "1"
+        run: make build 2>&1 | tee build.log
+      - name: Report build failure
+        if: failure()
+        shell: bash
+        run: |
+          for report in extern/vcpkg/installed/vcpkg/issue_body.md extern/vcpkg-windows/installed/vcpkg/issue_body.md; do
+            if [ -f "$report" ]; then
+              cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          if [ -f build.log ]; then
+            {
+              echo '### Build log (last 100 lines)'
+              echo '```text'
+              tail -100 build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          path: |
+            build.log
+            extern/vcpkg/installed/vcpkg/issue_body.md
+            extern/vcpkg-windows/installed/vcpkg/issue_body.md
+          name: build-logs-${{ matrix.os }}
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          path: "bridge*.tgz"
+          name: build-${{ matrix.os }}
+          if-no-files-found: error
+      - uses: actions/attest@v4
+        if: github.event_name != 'pull_request' && !github.event.repository.private
+        with:
+          subject-path: "bridge*.tgz"

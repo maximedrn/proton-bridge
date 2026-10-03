@@ -84,11 +84,10 @@ $vcpkgExe = (Join-Path $vcpkgRoot "vcpkg.exe")
 $vcpkgBootstrap = (Join-Path $vcpkgRoot "bootstrap-vcpkg.bat")
 
 function check_exit() {
-    if ($? -ne $True)
+    if ($LASTEXITCODE -ne 0)
     {
-        Write-Host "Process failed: $args[0] : $?"
-        Remove-Item "$buildDir" -Recurse -ErrorAction Ignore
-        exit 1
+        Write-Host "Process failed: $($args[0]) (exit code $LASTEXITCODE)"
+        exit $LASTEXITCODE
     }
 }
 
@@ -101,7 +100,7 @@ Write-host "Running build for version $bridgeVersion - $buildConfig in $buildDir
 $REVISION_HASH = git rev-parse --short=10 HEAD
 $bridgeTag = ($env:BRIDGE_TAG)
 $bridgeDsnSentry = ($env:BRIDGE_DSN_SENTRY)
-$bridgeBuidTime = ($env:BRIDGE_BUILD_TIME)
+$bridgeBuildTime = ($env:BRIDGE_BUILD_TIME)
 
 $bridgeBuildEnv = ($env:BRIDGE_BUILD_ENV)
 if ($null -eq $bridgeBuildEnv)
@@ -110,16 +109,18 @@ if ($null -eq $bridgeBuildEnv)
 }
 
 git submodule update --init --recursive $vcpkgRoot
+check_exit "Failed to initialize vcpkg as a submodule"
 . $vcpkgBootstrap -disableMetrics
+check_exit "Failed to bootstrap vcpkg"
 . $vcpkgExe install sentry-native:x64-windows grpc:x64-windows --x-buildtrees-root=C:\b --x-packages-root=C:\p --clean-after-build
-. $vcpkgExe upgrade --no-dry-run
+check_exit "Failed to install GUI dependencies"
 . $cmakeExe -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE="$buildConfig" `
                                        -DBRIDGE_APP_FULL_NAME="$bridgeFullName" `
                                        -DBRIDGE_VENDOR="$bridgeVendor" `
                                        -DBRIDGE_REVISION="$REVISION_HASH" `
                                        -DBRIDGE_TAG="$bridgeTag" `
                                        -DBRIDGE_APP_VERSION="$bridgeVersion" `
-                                       -DBRIDGE_BUILD_TIME="$bridgeBuidTime" `
+                                       -DBRIDGE_BUILD_TIME="$bridgeBuildTime" `
                                        -DBRIDGE_DSN_SENTRY="$bridgeDsnSentry" `
                                        -DBRIDGE_BUILD_ENV="$bridgeBuildEnv" `
                                        -S . -B $buildDir
@@ -131,9 +132,9 @@ check_exit "Build failed"
 
 if  ($($args.count) -gt 0 )
 {
-    if ($args[0] = "install")
+    if ($args[0] -eq "install")
     {
-        . $cmakeExe --install "$buildDir" -v
+        . $cmakeExe --install "$buildDir" --config "$buildConfig" -v
         check_exit "Install failed"
     }
 }

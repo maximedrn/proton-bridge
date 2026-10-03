@@ -19,6 +19,13 @@ package dialer
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,24 +97,36 @@ func TestTLSSignedCertWrongPublicKey(t *testing.T) {
 	r.Error(t, err, "expected dial to fail because of wrong public key")
 }
 
-/*
-For the following test the SSL pin rotates from time to time. Thus, the pin needs to be updated accordingly.
-A new pin can be extracted by running the following command:
-
-		echo | openssl s_client -connect rsa4096.badssl.com:443 2>/dev/null | \
-	  	openssl x509 -pubkey -noout | \
-		openssl pkey -pubin -outform DER | \
-		openssl dgst -sha256 -binary | \
-		base64
-*/
 func TestTLSSignedCertTrustedPublicKey(t *testing.T) {
-	skipIfProxyIsSet(t)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(func() {
+		server.CloseClientConnections()
+		server.Close()
+	})
 
-	_, dialer, _, checker, _ := createClientWithPinningDialer("")
-	copyTrustedPins(checker)
-	checker.trustedPins = append(checker.trustedPins, `pin-sha256="6ldn7wqGt9/ux7GDsd4gTtx8DcuW7xv/Ke3X9gDSjkc="`)
-	_, err := dialer.DialTLSContext(context.Background(), "tcp", "rsa4096.badssl.com:443")
+	// Derive the expected pin independently of the production fingerprint helper.
+	keyHash := sha256.Sum256(server.Certificate().RawSubjectPublicKeyInfo)
+	pin := fmt.Sprintf("pin-sha256=%q", base64.StdEncoding.EncodeToString(keyHash[:]))
+	checker := NewTLSPinChecker([]string{pin})
+	transport := server.Client().Transport.(*http.Transport)
+	secureDialer := verifiedTestTLSDialer{tls.Dialer{Config: transport.TLSClientConfig.Clone()}}
+	dialer := NewPinningTLSDialer(secureDialer, nil, checker)
+	conn, err := dialer.DialTLSContext(context.Background(), "tcp", server.Listener.Addr().String())
 	r.NoError(t, err, "expected dial to succeed because public key is known and cert is signed by CA")
+	r.NoError(t, conn.Close())
+}
+
+// verifiedTestTLSDialer performs a real TLS handshake with the test server's trusted CA.
+type verifiedTestTLSDialer struct {
+	tls.Dialer
+}
+
+func (d verifiedTestTLSDialer) DialTLSContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return d.DialContext(ctx, network, address)
+}
+
+func (verifiedTestTLSDialer) ShouldSkipCertificateChainVerification(string) bool {
+	return false
 }
 
 func TestTLSSelfSignedCertTrustedPublicKey(t *testing.T) {

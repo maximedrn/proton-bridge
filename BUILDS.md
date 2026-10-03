@@ -3,11 +3,12 @@
 ## Prerequisites
 * 64-bit OS:
     - the go-rfc5322 module cannot currently be compiled for 32-bit OSes
-* Go 1.24.0
+* Go matching `go.mod` (currently Go 1.26.7, with a minimum of 1.26.1)
 * Bash with basic build utils: make, gcc, sed, find, grep, ...
   - For Windows, it is recommended to use MinGW 64bit shell from [MSYS2](https://www.msys2.org/)
 * GCC (Linux), msvc (Windows) or Xcode (macOS)
 * Windres (Windows)
+* Visual Studio 2022 with its C++ build tools (Windows GUI)
 * libglvnd and libsecret development files (Linux)
 * pkg-config (Linux)
 * cmake, ninja-build and Qt 6.8.2 are required to build the graphical user interface. On Linux, 
@@ -35,10 +36,22 @@ export MSYSTEM=
 make build
 ```
 
-* The result will be stored in `./cmd/Destop-Bridge/deploy/${GOOS}/`
-    * for `linux`, the binary will have the name of the project directory (e.g `proton-bridge`)
-    * for `windows`, the binary will have the file extension `.exe` (e.g `proton-bridge.exe`)
-    * for `darwin`, the application will be created with name of the project directory (e.g `proton-bridge.app`)
+* The result will be stored in `./cmd/Desktop-Bridge/deploy/${GOOS}/` and packaged
+  as `bridge_${GOOS}_${REVISION}.tgz` in the project root.
+    * Linux: `proton-bridge` launcher, `bridge` backend, and `bridge-gui` interface.
+    * Windows: `proton-bridge.exe`, `bridge.exe`, and `bridge-gui.exe`.
+    * macOS: `proton-bridge.app`. Its GUI targets the runner's architecture;
+      Apple Silicon and Intel builds are published separately.
+
+The workflow uses fixed Ubuntu 24.04, Windows 2022, and macOS 15 runners. Qt 6.8.2
+still links against the AGL framework, which is absent from newer macOS SDKs;
+use an SDK that includes AGL when building this Qt version locally.
+The macOS 27 SDK also exposes `pipe2`, which c-ares detects even when targeting
+an older macOS release. The pinned macOS 15 CI runners avoid both SDK issues.
+
+The vcpkg submodules pin native dependency versions. Builds use vcpkg's binary
+cache and preserve CMake diagnostics on failure. They do not upgrade installed
+packages independently of the checked-out submodule versions.
 
 #### Build Bridge without GUI
 * If you need to build bridge without Qt dependencies, you can do so by running
@@ -70,5 +83,15 @@ In order to be able to run following commands please install the development dep
 
 * `make test` will run all unit tests
 * `make lint` will lint the whole project
-* `make -C ./test test` will run the integration tests
+* `make test-integration` will run the integration tests
 * `make run` will build Bridge without a GUI and start it in CLI mode
+
+To check this fork's compatibility and build-script changes without downloading
+GUI dependencies:
+
+```bash
+go test -race ./internal/constants
+go test -tags=build_qa ./internal/constants
+python3 utils/test_build_scripts.py
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
+```

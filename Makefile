@@ -38,14 +38,22 @@ GO_LDFLAGS+=-X "github.com/ProtonMail/proton-bridge/v3/internal/constants.FullAp
 VCPKG_ROOT_NIX := $(ROOT_DIR)/extern/vcpkg
 
 ifeq "${TARGET_OS}" "darwin"
-    VCPKG_INSTALLED_ARM := $(VCPKG_ROOT_NIX)/installed/arm64-osx
-    VCPKG_INSTALLED_X64 := $(VCPKG_ROOT_NIX)/installed/x64-osx
+    VCPKG_INSTALLED_ARM := $(VCPKG_ROOT_NIX)/installed/arm64-osx-min-11-0
+    VCPKG_INSTALLED_X64 := $(VCPKG_ROOT_NIX)/installed/x64-osx-min-10-15
 
 	LIBFIDO2_CFLAGS_ARM64 := -I$(VCPKG_INSTALLED_ARM)/include
 	LIBFIDO2_LDFLAGS_ARM64 := -L$(VCPKG_INSTALLED_ARM)/lib -lfido2 -lcbor -lssl -lcrypto
 
 	LIBFIDO2_CFLAGS_X64 := -I$(VCPKG_INSTALLED_X64)/include
 	LIBFIDO2_LDFLAGS_X64 := -L$(VCPKG_INSTALLED_X64)/lib -lfido2 -lcbor -lssl -lcrypto
+
+    # CGO's libfido2 package discovers headers and libraries through pkg-config.
+    SYSTEM_PKG_CONFIG_PATH := $(PKG_CONFIG_PATH)
+    ifeq "$(shell uname -m)" "arm64"
+        export PKG_CONFIG_PATH := $(VCPKG_INSTALLED_ARM)/lib/pkgconfig:$(SYSTEM_PKG_CONFIG_PATH)
+    else
+        export PKG_CONFIG_PATH := $(VCPKG_INSTALLED_X64)/lib/pkgconfig:$(SYSTEM_PKG_CONFIG_PATH)
+    endif
 endif
 ifeq "${TARGET_OS}" "linux"
     LIBFIDO2_LDFLAGS := -lfido2 -lcbor -lssl -lcrypto
@@ -112,17 +120,25 @@ endif
 
 go-build=go build $(1) -o $(2) $(3)
 go-build-finalize=${go-build}
-ifeq "${GOOS}-$(shell uname -m)" "darwin-arm64"
+ifeq "${GOOS}" "darwin"
+	go-build-finalize= \
+		MACOSX_DEPLOYMENT_TARGET=${MACOS_MIN_VERSION_AMD64} CGO_ENABLED=1 \
+		CGO_CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION_AMD64} ${LIBFIDO2_CFLAGS_X64}" \
+		CGO_LDFLAGS="${LIBFIDO2_LDFLAGS_X64}" \
+		$(call go-build,$(1),$(2),$(3))
+ifeq "$(shell uname -m)" "arm64"
 	go-build-finalize= \
 		MACOSX_DEPLOYMENT_TARGET=${MACOS_MIN_VERSION_ARM64} CGO_ENABLED=1 \
     	CGO_CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION_ARM64} ${LIBFIDO2_CFLAGS_ARM64}" \
     	CGO_LDFLAGS="${LIBFIDO2_LDFLAGS_ARM64}" \
 		GOARCH=arm64 $(call go-build,$(1),$(2)_arm,$(3)) && \
 		MACOSX_DEPLOYMENT_TARGET=${MACOS_MIN_VERSION_AMD64} CGO_ENABLED=1 \
+		PKG_CONFIG_PATH="$(VCPKG_INSTALLED_X64)/lib/pkgconfig:$(SYSTEM_PKG_CONFIG_PATH)" \
 		CGO_CFLAGS="-mmacosx-version-min=${MACOS_MIN_VERSION_AMD64} ${LIBFIDO2_CFLAGS_X64}" \
 		CGO_LDFLAGS="${LIBFIDO2_LDFLAGS_X64}" \
 		GOARCH=amd64 $(call go-build,$(1),$(2)_amd,$(3)) && \
 		lipo -create -output $(2) $(2)_arm $(2)_amd && rm -f $(2)_arm $(2)_amd
+endif
 endif
 
 ifeq "${GOOS}" "windows"
@@ -143,6 +159,10 @@ endif
 ${EXE_NAME}: gofiles  ${RESOURCE_FILE}
 	$(call go-build-finalize,${BUILD_FLAGS},"${LAUNCHER_EXE}","./cmd/${TARGET_CMD}/","${ROOT_DIR}/cmd/${TARGET_CMD}/${RESOURCE_FILE}")
 	mv ${LAUNCHER_EXE} ${BRIDGE_EXE}
+
+ifeq "${TARGET_OS}" "darwin"
+${EXE_NAME}: | install-libfido2
+endif
 
 build-launcher: ${RESOURCE_FILE}
 	$(call go-build-finalize,${BUILD_FLAGS_LAUNCHER},"${LAUNCHER_EXE}","${ROOT_DIR}/${LAUNCHER_PATH}/","${ROOT_DIR}/${LAUNCHER_PATH}/${RESOURCE_FILE}")
@@ -489,7 +509,8 @@ ifeq "${TARGET_OS}" "darwin"
 	git submodule update --init --recursive ${VCPKG_ROOT_NIX} || \
 		{ echo "Failed to init vcpkg submodule"; exit 1; }
 	${VCPKG_ROOT_NIX}/bootstrap-vcpkg.sh -disableMetrics
-	cd extern/vcpkg && ./vcpkg install libfido2:arm64-osx libfido2:x64-osx
+	cd extern/vcpkg && ./vcpkg install libfido2:arm64-osx-min-11-0 libfido2:x64-osx-min-10-15 \
+		--overlay-triplets="${ROOT_DIR}/internal/frontend/bridge-gui/bridge-gui/vcpkg/triplets" --clean-after-build
 endif
 
 

@@ -6,6 +6,32 @@ For a detailed build information see [BUILDS](./BUILDS.md).
 The license can be found in [LICENSE](./LICENSE) file, for more licensing information see [COPYING_NOTES](./COPYING_NOTES.md).
 For contribution policy see [CONTRIBUTING](./CONTRIBUTING.md).
 
+## About this fork
+
+This fork follows [ProtonMail/proton-bridge](https://github.com/ProtonMail/proton-bridge)
+and preserves mnixry's compatibility patches for free Proton Mail accounts:
+
+* API requests use the `other` application identifier and `https://mail.proton.me/api`.
+* Request headers use the latest Android Mail release version. The lookup has a
+  10-second timeout, runs once per process, and falls back to the build version if
+  GitHub is unavailable. Concurrent requests share the cached result.
+
+These patches are in `internal/constants/constants.go`, `host_default.go`, and
+`version_default.go`. Their continued compatibility depends on Proton's API.
+Merge upstream changes instead of replacing the fork's branch:
+
+```bash
+git remote add upstream https://github.com/ProtonMail/proton-bridge.git # once
+git fetch upstream
+git merge upstream/master
+go test -race ./internal/constants
+```
+
+The GitHub Actions workflow builds Linux x64, Windows x64, macOS Apple Silicon,
+and macOS Intel packages on pushes, pull requests, manual runs, and a daily
+schedule. Scheduled runs rebuild the checked-out branch; they do not merge new
+upstream commits. Download packages from each run's `build-*` artifacts.
+
 
 ## Description Bridge
 Proton Mail Bridge for e-mail clients.
@@ -88,5 +114,4 @@ There are now three types of system folders which Bridge recognises:
 | Update files           | data     | updates                    |
 | sentry cache           | data     | sentry_cache               |
 | Mac/Linux File Socket  | temp     | bridge{4_DIGITS}           |
-
 
